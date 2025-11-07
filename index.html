@@ -8,7 +8,7 @@
   <!-- Styles -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- PWA -->
+  <!-- PWA manifest -->
   <link rel="manifest" href="manifest.json"/>
 
   <!-- Libraries -->
@@ -16,7 +16,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js" defer></script>
 
-  <!-- App -->
+  <!-- App (defer so DOM available) -->
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -26,9 +26,10 @@
         <div class="logo">💊</div>
         <div>
           <h1>MediScan Pro</h1>
-          <p class="muted">Drug verification, dosage guidance & ADR reporting — Developed & Provided by <strong>HCK_Pharma</strong></p>
+          <p class="muted">Drug verification & ADR reporting — Developed & Provided by <strong>HCK_Pharma</strong></p>
         </div>
       </div>
+
       <div class="header-actions">
         <button id="installBtn" class="btn ghost" style="display:none">Install</button>
         <button id="themeToggle" class="btn ghost">🌙</button>
@@ -36,7 +37,7 @@
     </header>
 
     <main class="grid">
-      <!-- LEFT: Scanner / Drug Card / Report -->
+      <!-- Left: scanner, card, report -->
       <section class="panel left">
         <div class="controls">
           <button id="btnStart" class="btn primary">📷 Scan QR (Back)</button>
@@ -76,7 +77,7 @@
         </div>
       </section>
 
-      <!-- RIGHT: Search / History / Chart / Info -->
+      <!-- Right: search, chart, history, info -->
       <aside class="panel right">
         <div class="side-top">
           <input id="searchInput" placeholder="Search drug manually e.g., Augmentin" />
@@ -99,7 +100,7 @@
 
         <div class="card info">
           <h4>Sources & Notes</h4>
-          <p class="muted small">Local DRAP JSON is authoritative in this demo. openFDA is used as fallback (US data). This system is for educational/demo use; not for clinical decision-making.</p>
+          <p class="muted small">Local DRAP JSON is authoritative for demo. openFDA used as fallback (US data). For educational/demo use only.</p>
         </div>
       </aside>
     </main>
@@ -111,4 +112,4 @@
     </footer>
   </div>
 </body>
-  </html>
+</html>
