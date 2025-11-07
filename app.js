@@ -1,128 +1,161 @@
 /**
- * app.js — Final MediScan Pro
- * - Robust camera start (html5-qrcode with rear preference)
- * - Separate getUserMedia track for torch support
- * - Theme toggle with persistence
- * - DRAP local + openFDA fallback
- * - Dose comparison, ADR reporting, chart, PWA support
+ * app.js — MediScan Pro final with jsQR decoding
+ * - Rear camera (preferred) + torch toggle
+ * - Gallery QR decode
+ * - Manual search & OpenFDA fallback
+ * - Local DRAP dataset fallback (drap_drugs.json)
+ * - ADR reporting with dose comparison and history (localStorage)
+ * - PWA install prompt & service worker registration
  */
 
+// ---------- Config / constants ----------
 const DRAP_FILE = 'drap_drugs.json';
-const STORAGE_KEY = 'mediscan_reports_final_v1';
+const STORAGE_KEY = 'mediscan_reports_v_final';
 
-/* ----------------- DOM helpers ----------------- */
+// ---------- DOM ----------
 const $ = s => document.querySelector(s);
-const showToast = (msg, time=2000) => {
-  const el = $('#toast'); el.textContent = msg; el.hidden=false; el.style.display='block';
-  setTimeout(()=>{ el.hidden=true; el.style.display='none'; }, time);
-};
+const btnStart = $('#btnStart'), btnStop = $('#btnStop'), btnTorch = $('#btnTorch'), btnGallery = $('#btnGallery');
+const searchInput = $('#searchInput'), btnSearch = $('#btnSearch'), btnClearSearch = $('#btnClearSearch');
+const cameraEl = $('#camera'), canvasEl = $('#scanCanvas');
+const drugCard = $('#drugCard'), reportPanel = $('#reportPanel');
+const reportForm = $('#reportForm'), doseWarning = $('#doseWarning');
+const historyList = $('#historyList'), btnExport = $('#btnExport'), btnClearAll = $('#btnClearAll');
+const toastEl = $('#toast'), themeToggle = $('#themeToggle'), installBtn = $('#installBtn');
 
-/* ----------------- state ----------------- */
 let drapIndex = {};
-let html5QrCode = null;
-let lastTrack = null;
+let currentStream = null;
+let scanActive = false;
+let jsqrContext = null;
 let lastParsed = { name:'', batch:'', expiry:'' };
-let severityChart = null;
+let deferredPrompt = null;
 
-/* ----------------- DOM refs ----------------- */
-const btnStart = $('#btnStart'), btnStop = $('#btnStop'), btnTorch = $('#btnTorch');
-const btnGallery = $('#btnGallery'), btnManual = $('#btnManual');
-const scannerFallback = $('#scannerFallback'), qrReader = $('#qr-reader');
-const drugCard = $('#drugCard'), reportPanel = $('#reportPanel'), reportForm = $('#reportForm');
-const historyList = $('#historyList'), btnSearch = $('#btnSearch'), searchInput = $('#searchInput');
-const btnExport = $('#btnExport'), btnClearAll = $('#btnClearAll'), doseWarning = $('#doseWarning');
-const themeToggle = $('#themeToggle'), installBtn = $('#installBtn');
+// ---------- Utilities ----------
+function showToast(msg, ms=1800){ toastEl.textContent = msg; toastEl.hidden = false; toastEl.style.display='block'; setTimeout(()=>{ toastEl.hidden=true; toastEl.style.display='none'; }, ms); }
+function escapeHtml(s){ if(s==null) return ''; return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
 
-/* ----------------- Load local DRAP dataset ----------------- */
+// ---------- Load DRAP local dataset ----------
 async function loadDrapLocal(){
   try{
-    const res = await fetch(DRAP_FILE);
-    if(!res.ok){ drapIndex = {}; console.warn('DRAP file missing'); return; }
-    const arr = await res.json();
+    const r = await fetch(DRAP_FILE);
+    if(!r.ok){ drapIndex = {}; return; }
+    const arr = await r.json();
     drapIndex = {};
     arr.forEach(d => {
       if(d.name) drapIndex[d.name.toLowerCase()] = d;
       if(d.synonyms && Array.isArray(d.synonyms)) d.synonyms.forEach(s => drapIndex[s.toLowerCase()] = d);
     });
-    console.log('DRAP loaded:', Object.keys(drapIndex).length);
-  }catch(e){ console.warn('DRAP load error', e); drapIndex = {}; }
+    console.log('Loaded DRAP local:', Object.keys(drapIndex).length);
+  }catch(e){ console.warn('Failed load drap', e); drapIndex = {}; }
 }
 
-/* ----------------- Camera & scanning (html5-qrcode) ----------------- */
-async function startCameraScan(){
-  try{ await stopCameraScan(); } catch(e){}
-  if(!html5QrCode) html5QrCode = new Html5Qrcode("qr-reader", { verbose:false });
-
+// ---------- Camera init + scan loop using jsQR ----------
+async function startCamera(){
+  if(currentStream) return;
   try{
-    const devices = await Html5Qrcode.getCameras();
-    if(!devices || devices.length === 0){ alert('No camera found'); return; }
-    // prefer a rear camera (match label)
-    const back = devices.find(d => /back|rear|environment/i.test(d.label)) || devices[0];
-    const deviceId = back.id;
-
-    scannerFallback.style.display = 'none';
-
-    await html5QrCode.start(
-      { deviceId: { exact: deviceId } },
-      { fps: 10, qrbox: { width: 280, height: 280 } },
-      async decodedText => { await onScanned(decodedText); },
-      err => { /* scanning */ }
-    );
-
-    // open a separate stream to get the MediaStreamTrack for torch
+    // Prefer exact rear camera if available, fallback to ideal
+    let constraints = { video: { facingMode: { exact: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio:false };
     try{
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: deviceId } } });
-      lastTrack = stream.getVideoTracks()[0];
-      const caps = lastTrack.getCapabilities();
-      if(caps && caps.torch) btnTorch.style.display = 'inline-block'; else btnTorch.style.display = 'none';
-    }catch(e){ lastTrack = null; btnTorch.style.display = 'none'; }
-
-    btnStart.style.display = 'none'; btnStop.style.display = 'inline-block';
-    showToast('Camera started — point to QR');
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      handleStream(stream);
+    }catch(e){
+      // fallback to ideal (some browsers don't accept exact)
+      constraints.video.facingMode = { ideal: "environment" };
+      const stream2 = await navigator.mediaDevices.getUserMedia(constraints);
+      handleStream(stream2);
+    }
   }catch(err){
-    console.error('startCameraScan error', err);
-    alert('Camera start failed: ' + (err.message || err));
-    scannerFallback.style.display = 'block';
+    console.error('Camera init failed', err);
+    alert('Camera access failed. Check permissions and HTTPS. If blocked, allow camera in site settings.');
   }
 }
 
-async function stopCameraScan(){
-  try{ if(html5QrCode) await html5QrCode.stop(); }catch(e){ console.warn(e); }
-  if(lastTrack){ try{ lastTrack.stop(); }catch(e){} lastTrack = null; }
-  scannerFallback.style.display = 'block';
-  btnStart.style.display = 'inline-block'; btnStop.style.display = 'none'; btnTorch.style.display = 'none';
-}
-
-let torchOn = false;
-async function toggleTorch(){
-  if(!lastTrack) return alert('Torch unavailable on this device/browser.');
+function handleStream(stream){
+  currentStream = stream;
+  cameraEl.srcObject = stream;
+  cameraEl.play().catch(()=>{});
+  btnStart.style.display='none'; btnStop.style.display='inline-block';
+  // torch capability check
   try{
-    const caps = lastTrack.getCapabilities();
-    if(!caps.torch) return alert('Torch not supported.');
-    torchOn = !torchOn;
-    await lastTrack.applyConstraints({ advanced: [{ torch: torchOn }]});
-    showToast(torchOn ? 'Torch ON' : 'Torch OFF');
-  }catch(e){ console.warn('toggleTorch', e); alert('Torch control failed'); }
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities();
+    if(caps && caps.torch) btnTorch.style.display='inline-block'; else btnTorch.style.display='none';
+  }catch(e){ btnTorch.style.display='none'; }
+
+  // prepare canvas context for jsQR
+  canvasEl.width = cameraEl.videoWidth || 640;
+  canvasEl.height = cameraEl.videoHeight || 480;
+  jsqrContext = canvasEl.getContext('2d');
+
+  scanActive = true;
+  scanLoop();
+  showToast('Camera started — point to QR');
 }
 
-/* ----------------- Gallery decode (jsQR) ----------------- */
-btnGallery.addEventListener('click', () => {
-  const input = document.createElement('input'); input.type = 'file'; input.accept = 'image/*';
+function stopCamera(){
+  scanActive = false;
+  if(currentStream){
+    currentStream.getTracks().forEach(t => t.stop());
+    currentStream = null;
+  }
+  cameraEl.srcObject = null;
+  btnStart.style.display='inline-block'; btnStop.style.display='none'; btnTorch.style.display='none';
+  showToast('Camera stopped',1200);
+}
+
+async function toggleTorch(){
+  if(!currentStream) return alert('Start camera first');
+  const track = currentStream.getVideoTracks()[0];
+  const caps = track.getCapabilities();
+  if(!caps || !caps.torch) return alert('Torch not supported');
+  try{
+    const isOn = btnTorch.dataset.on === 'true';
+    await track.applyConstraints({ advanced: [{ torch: !isOn }] });
+    btnTorch.dataset.on = (!isOn).toString();
+    btnTorch.textContent = isOn ? '🔦 Torch' : '💡 Torch ON';
+  }catch(e){ console.warn('Torch error', e); alert('Torch toggle failed'); }
+}
+
+async function scanLoop(){
+  if(!scanActive) return;
+  if(cameraEl.readyState === cameraEl.HAVE_ENOUGH_DATA){
+    // update canvas size to video size (some devices need this per frame)
+    canvasEl.width = cameraEl.videoWidth;
+    canvasEl.height = cameraEl.videoHeight;
+    jsqrContext.drawImage(cameraEl, 0, 0, canvasEl.width, canvasEl.height);
+    try{
+      const imageData = jsqrContext.getImageData(0,0,canvasEl.width,canvasEl.height);
+      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      if(code && code.data){
+        // we found a QR — stop scanning briefly and handle
+        scanActive = false;
+        await handleScanned(code.data.trim());
+        // small delay then resume scanning
+        setTimeout(()=>{ scanActive = true; scanLoop(); }, 800);
+        return;
+      }
+    }catch(e){ /* sometimes getImageData can fail on some devices; ignore */ }
+  }
+  requestAnimationFrame(scanLoop);
+}
+
+// ---------- Gallery upload decode (jsQR) ----------
+btnGallery.addEventListener('click', ()=>{
+  const input = document.createElement('input'); input.type='file'; input.accept='image/*';
   input.onchange = (ev) => {
     const file = ev.target.files[0]; if(!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width; canvas.height = img.height;
-        const ctx = canvas.getContext('2d'); ctx.drawImage(img, 0, 0);
+      img.onload = async () => {
+        canvasEl.width = img.width; canvasEl.height = img.height;
+        jsqrContext = canvasEl.getContext('2d');
+        jsqrContext.drawImage(img,0,0);
         try{
-          const id = ctx.getImageData(0,0,canvas.width,canvas.height);
-          const code = jsQR(id.data, id.width, id.height, { inversionAttempts: 'attemptBoth' });
-          if(code && code.data) onScanned(code.data.trim());
-          else alert('No QR code detected in the image.');
-        }catch(e){ alert('Image decode error.'); console.warn(e); }
+          const id = jsqrContext.getImageData(0,0,canvasEl.width,canvasEl.height);
+          const code = jsQR(id.data, id.width, id.height);
+          if(code && code.data) await handleScanned(code.data.trim());
+          else alert('No QR found in the image.');
+        }catch(e){ alert('Failed to decode image.'); console.warn(e); }
       };
       img.src = reader.result;
     };
@@ -131,18 +164,7 @@ btnGallery.addEventListener('click', () => {
   input.click();
 });
 
-/* ----------------- Manual input & search ----------------- */
-btnManual.addEventListener('click', () => {
-  const q = prompt('Enter drug name or JSON payload (e.g., {"drugName":"Augmentin","batch":"A1","expiry":"12/2026"})');
-  if(q) onScanned(q.trim());
-});
-btnSearch.addEventListener('click', () => {
-  const q = searchInput.value.trim();
-  if(!q) return alert('Type a drug name to search.');
-  onScanned(q);
-});
-
-/* ----------------- Parse scanned payload ----------------- */
+// ---------- Parse payload and normalize ----------
 function parsePayload(raw){
   const out = { name:'', batch:'', expiry:'' };
   try{
@@ -151,29 +173,32 @@ function parsePayload(raw){
     out.batch = o.batch || o.lot || '';
     out.expiry = o.expiry || '';
     if(out.name) return out;
-  }catch(e){}
+  }catch(e){ /* not JSON */ }
+
+  // GS1 patterns (optional)
   try{
     const m10 = raw.match(/\(10\)([A-Z0-9\-]+?)(?=\(|$)/); if(m10) out.batch = m10[1];
     const m17 = raw.match(/\(17\)(\d{6})/); if(m17) out.expiry = m17[1];
   }catch(e){}
-  if(!out.name) out.name = raw;
+
+  // fallback plain text as drug name
+  out.name = raw;
   return out;
 }
 
-/* ----------------- On scanned result ----------------- */
-async function onScanned(raw){
-  showToast('Scanned: ' + (raw.length>40 ? raw.slice(0,40) + '...' : raw), 1200);
-  try{ await stopCameraScan(); }catch(e){}
+// ---------- On scanned (camera or gallery or manual) ----------
+async function handleScanned(raw){
+  showToast('Scanned: ' + (raw.length>40 ? raw.slice(0,40)+'...' : raw),1200);
+  try{ stopCamera(); }catch(e){}
   const parsed = parsePayload(raw);
   lastParsed = parsed;
   renderQuickCard(parsed);
   await fetchAndRenderDrug(parsed);
-  reportPanel.classList.remove('hidden');
 }
 
-/* ----------------- Render quick card ----------------- */
+// ---------- Quick preview card ----------
 function renderQuickCard(parsed){
-  const lc = (parsed.name||'').toLowerCase();
+  const lc = parsed.name.toLowerCase();
   const local = drapIndex[lc] || null;
   if(local){
     drugCard.innerHTML = `<div class="drug-title">${escapeHtml(local.name)}</div>
@@ -183,9 +208,10 @@ function renderQuickCard(parsed){
       <div class="meta">${parsed.batch?`<b>Batch:</b> ${escapeHtml(parsed.batch)} • `:""}${parsed.expiry?`<b>EXP:</b> ${escapeHtml(parsed.expiry)} `:""}</div>`;
   }
   drugCard.classList.remove('hidden');
+  reportPanel.classList.remove('hidden');
 }
 
-/* ----------------- Fetch & merge data (local DRAP or OpenFDA fallback) ----------------- */
+// ---------- Fetch data: local DRAP or openFDA fallback ----------
 async function fetchAndRenderDrug(parsed){
   const name = (parsed.name||'').trim();
   if(!name){ drugCard.innerHTML = '<div>No drug name detected.</div>'; return; }
@@ -198,7 +224,7 @@ async function fetchAndRenderDrug(parsed){
     }
   }
 
-  // OpenFDA fallback
+  // openFDA fallback (label + events)
   let usesFDA = [], adrsFDA = [], doseFDA = '';
   if(!local){
     try{
@@ -211,7 +237,7 @@ async function fetchAndRenderDrug(parsed){
         const dosage = j.results?.[0]?.dosage_and_administration || j.results?.[0]?.how_supplied || '';
         doseFDA = Array.isArray(dosage) ? dosage.slice(0,2).join(' ') : String(dosage || '');
       }
-    }catch(e){ console.warn('OpenFDA label error', e); }
+    }catch(e){ console.warn('OpenFDA label fail', e); }
 
     try{
       const qE = encodeURIComponent(`patient.drug.medicinalproduct:"${name}"`);
@@ -222,7 +248,7 @@ async function fetchAndRenderDrug(parsed){
         (je.results||[]).forEach(ev => (ev.patient?.reaction||[]).forEach(rx => { if(rx.reactionmeddrapt) freq[rx.reactionmeddrapt] = (freq[rx.reactionmeddrapt]||0)+1; }));
         adrsFDA = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12).map(e=>e[0]);
       }
-    }catch(e){ console.warn('OpenFDA event error', e); }
+    }catch(e){ console.warn('OpenFDA events fail', e); }
   }
 
   const merged = {
@@ -241,7 +267,7 @@ async function fetchAndRenderDrug(parsed){
   renderDrug(merged);
 }
 
-/* ----------------- Render full drug card ----------------- */
+// ---------- Render drug details card ----------
 function renderDrug(d){
   const usesLocalHtml = d.uses_local && d.uses_local.length ? `<div class="section"><b>DRAP / Local Uses:</b><ul>${d.uses_local.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : `<div class="section"><i>No local DRAP entry.</i></div>`;
   const usesOffHtml = d.uses_official && d.uses_official.length ? `<div class="section"><b>OpenFDA Uses:</b><ul>${d.uses_official.map(x=>`<li>${escapeHtml(x)}</li>`).join('')}</ul></div>` : '';
@@ -250,26 +276,31 @@ function renderDrug(d){
   const doseHtml = d.dosage_official ? `<div class="section"><b>Dosage & Administration (official):</b><div style="margin-top:6px">${escapeHtml(d.dosage_official)}</div></div>` : '';
 
   drugCard.innerHTML = `
-    <div class="drug-title">${escapeHtml(d.name)}</div>
-    <div class="meta"><b>Manufacturer:</b> ${escapeHtml(d.manufacturer)} • <b>Batch:</b> ${escapeHtml(d.batch||'N/A')} • <b>EXP:</b> ${escapeHtml(d.expiry||'—')}</div>
+    <div style="display:flex;justify-content:space-between;align-items:center"><div>
+      <div style="font-size:18px;font-weight:800;color:var(--accent)">${escapeHtml(d.name)}</div>
+      <div style="color:#666;margin-top:6px"><b>Manufacturer:</b> ${escapeHtml(d.manufacturer)} • <b>Batch:</b> ${escapeHtml(d.batch||'N/A')} • <b>EXP:</b> ${escapeHtml(d.expiry||'—')}</div>
+    </div></div>
     ${doseHtml}
     ${usesLocalHtml}
     ${usesOffHtml}
     ${adrsLocalHtml}
     ${adrsRepHtml}
-    <div style="margin-top:8px; font-size:12px; color:#666;">Note: DRAP local entries are authoritative. OpenFDA is fallback and shows reported events.</div>
+    <div style="margin-top:8px; font-size:12px; color:#666;">Note: DRAP local entries are authoritative in this demo. OpenFDA is fallback (US data).</div>
   `;
   drugCard.classList.remove('hidden');
   reportPanel.classList.remove('hidden');
 
+  // fill batch input
   if(d.batch) document.getElementById('p_batch').value = d.batch;
+
+  // show dose guidance if available
   if(d.maxDoseMg){
     doseWarning.innerHTML = `Reference max dose: <strong>${d.maxDoseMg} mg</strong>. Entered amount will be checked against this.`;
     doseWarning.classList.remove('hidden');
   } else doseWarning.classList.add('hidden');
 }
 
-/* ----------------- ADR Reporting ----------------- */
+// ---------- Report submit & history ----------
 reportForm.addEventListener('submit', (ev) => {
   ev.preventDefault();
   const amountMg = Number(document.getElementById('p_amount_mg').value || 0);
@@ -294,23 +325,23 @@ reportForm.addEventListener('submit', (ev) => {
     return;
   }
 
-  // high dose check
   const local = drapIndex[report.drug.toLowerCase()];
-  if(local && local.maxDoseMg && amountMg) {
+  if(local && local.maxDoseMg && amountMg){
     if(amountMg > Number(local.maxDoseMg)) report.highDose = true;
   }
 
   const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   arr.push(report);
   localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  showToast('✅ Report saved locally & submitted (demo).', 2000);
+  showToast('✅ Report saved locally & queued for officials',2000);
   reportForm.reset();
   renderHistory();
-  updateChart();
 });
 
-/* ----------------- Export & Clear ----------------- */
-$('#btnClear').addEventListener('click', ()=> reportForm.reset());
+// reset form
+$('#btnReset').addEventListener('click', ()=> reportForm.reset());
+
+// export & clear
 btnExport.addEventListener('click', ()=> {
   const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   const blob = new Blob([JSON.stringify(arr, null, 2)], { type: 'application/json' });
@@ -318,13 +349,10 @@ btnExport.addEventListener('click', ()=> {
 });
 btnClearAll.addEventListener('click', ()=> {
   if(!confirm('Clear all saved ADR reports locally?')) return;
-  localStorage.removeItem(STORAGE_KEY);
-  renderHistory();
-  updateChart();
-  showToast('Cleared reports.');
+  localStorage.removeItem(STORAGE_KEY); renderHistory(); showToast('Cleared reports.');
 });
 
-/* ----------------- History & details ----------------- */
+// render history
 function renderHistory(){
   const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
   if(!arr.length){ historyList.innerHTML = `<div style="color:var(--muted)">No reports yet.</div>`; return; }
@@ -333,92 +361,69 @@ function renderHistory(){
       <div style="display:flex; justify-content:space-between; align-items:center">
         <div>
           <strong>${escapeHtml(r.drug)}</strong> <small style="color:#666">${escapeHtml(r.batch)}</small>
-          ${r.highDose ? '<span class="dose-flag"> ⚠ High dose</span>' : ''}
+          ${r.highDose ? '<span style="color:var(--warn); font-weight:800"> ⚠ High dose</span>' : ''}
         </div>
         <div style="text-align:right"><small>${new Date(r.date).toLocaleString()}</small></div>
       </div>
       <div style="margin-top:8px; font-size:13px">
         <b>Patient:</b> ${escapeHtml(r.patientName)} • ${escapeHtml(r.age)} y • ${escapeHtml(r.gender)}<br>
-        <b>Severity:</b> <span class="${r.severity==='Severe' ? 'dose-flag' : (r.severity==='Moderate' ? 'pill' : '')}">${escapeHtml(r.severity)}</span> • <b>Condition:</b> ${escapeHtml(r.condition)} • <b>Amount:</b> ${escapeHtml(r.amountMg||'N/A')} mg
+        <b>Severity:</b> <em>${escapeHtml(r.severity)}</em> • <b>Condition:</b> ${escapeHtml(r.condition)} • <b>Amount:</b> ${escapeHtml(r.amountMg||'N/A')} mg
         <div style="margin-top:6px">${escapeHtml(r.description)}</div>
         <div style="margin-top:8px"><button class="btn ghost small" onclick="viewReportDetail('${r.id}')">View Details</button></div>
       </div>
     </div>
   `).join('');
 }
-
 window.viewReportDetail = function(id){
   const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  const r = arr.find(x => x.id === id);
+  const r = arr.find(x=>x.id===id);
   if(!r) return alert('Report not found');
   const txt = `Report for ${r.drug}\n\nPatient: ${r.patientName} (${r.age}, ${r.gender})\nCondition: ${r.condition}\nSeverity: ${r.severity}\nAmount: ${r.amountMg||'N/A'} mg\nBatch: ${r.batch}\nPhone: ${r.phone||'—'}\n\nDescription:\n${r.description}\n\nReported: ${new Date(r.date).toLocaleString()}`;
   alert(txt);
 };
 
-/* ----------------- Chart ----------------- */
-function updateChart(){
-  const arr = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
-  const counts = { Mild:0, Moderate:0, Severe:0 };
-  arr.forEach(r => { if(r.severity in counts) counts[r.severity]++; });
-  const data = [counts.Mild, counts.Moderate, counts.Severe];
-  if(!severityChart){
-    const ctx = document.getElementById('severityChart').getContext('2d');
-    severityChart = new Chart(ctx, {
-      type: 'doughnut',
-      data: {
-        labels: ['Mild','Moderate','Severe'],
-        datasets: [{ data, backgroundColor: ['#60a5fa','#f59e0b','#ef4444'] }]
-      },
-      options: { plugins:{ legend:{ position:'bottom' } } }
-    });
-  } else {
-    severityChart.data.datasets[0].data = data;
-    severityChart.update();
-  }
-}
+// ---------- Search manual ----------
+btnSearch.addEventListener('click', async ()=> {
+  const q = searchInput.value.trim();
+  if(!q) return alert('Enter search term');
+  await handleScanned(q);
+});
+btnClearSearch.addEventListener('click', ()=> { searchInput.value=''; });
 
-/* ----------------- Theme toggle ----------------- */
-function applyTheme(theme){
-  document.documentElement.setAttribute('data-theme', theme);
-  localStorage.setItem('theme', theme);
-  themeToggle.textContent = theme === 'dark' ? '☀️' : '🌙';
-}
+// ---------- parse payloads when scanning by text ----------
+/* handled by parsePayload + handleScanned */
 
-themeToggle.addEventListener('click', () => {
-  const cur = localStorage.getItem('theme') || 'light';
-  applyTheme(cur === 'light' ? 'dark' : 'light');
+// ---------- Gallery & manual scanning handled above ----------
+
+// ---------- Theme toggle & PWA ----------
+themeToggle.addEventListener('click', ()=> {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  document.documentElement.setAttribute('data-theme', isDark ? '':'dark');
+  themeToggle.textContent = isDark ? '🌙' : '☀️';
 });
 
-/* ----------------- Utilities ----------------- */
-function escapeHtml(s){ if(!s && s!==0) return ''; return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
-
-/* ----------------- Bindings ----------------- */
-btnStart.addEventListener('click', startCameraScan);
-btnStop.addEventListener('click', stopCameraScan);
-btnTorch.addEventListener('click', toggleTorch);
-
-/* ----------------- PWA install handling ----------------- */
-let deferredPrompt;
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  deferredPrompt = e;
-  installBtn.style.display = 'inline-block';
-  installBtn.onclick = async () => {
+// beforeinstallprompt (PWA)
+window.addEventListener('beforeinstallprompt', (e)=> {
+  e.preventDefault(); deferredPrompt = e; installBtn.style.display='inline-block';
+  installBtn.onclick = async ()=> {
     deferredPrompt.prompt();
     await deferredPrompt.userChoice;
-    deferredPrompt = null;
-    installBtn.style.display = 'none';
+    deferredPrompt = null; installBtn.style.display='none';
   };
 });
 
-/* ----------------- init ----------------- */
-(async function init(){
-  // set theme from localStorage
-  const saved = localStorage.getItem('theme') || 'light';
-  applyTheme(saved);
+// register service worker
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(e=>console.warn('SW failed', e));
+}
 
+// ---------- Bind buttons ----------
+btnStart.addEventListener('click', startCamera);
+btnStop.addEventListener('click', stopCamera);
+btnTorch.addEventListener('click', toggleTorch);
+
+// ---------- init ----------
+(async function init(){
   await loadDrapLocal();
   renderHistory();
-  updateChart();
-  if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(e=>console.warn('SW failed', e));
 })();
