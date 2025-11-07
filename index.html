@@ -1,22 +1,14 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>MediScan Pro — ADR Reporting & Verification</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MediScan Pro — ADR Reporter</title>
 
-  <!-- Styles -->
   <link rel="stylesheet" href="style.css" />
-
-  <!-- PWA manifest -->
-  <link rel="manifest" href="manifest.json"/>
-
-  <!-- Libraries -->
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/minified/html5-qrcode.min.js" defer></script>
+  <link rel="manifest" href="manifest.json" />
+  <!-- jsQR library -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.3.0/dist/chart.umd.min.js" defer></script>
-
-  <!-- App (defer so DOM available) -->
   <script src="app.js" defer></script>
 </head>
 <body>
@@ -26,38 +18,46 @@
         <div class="logo">💊</div>
         <div>
           <h1>MediScan Pro</h1>
-          <p class="muted">Drug verification & ADR reporting — Developed & Provided by <strong>HCK_Pharma</strong></p>
+          <p class="muted">Drug verification, dosage guidance & ADR reporting</p>
         </div>
       </div>
-
-      <div class="header-actions">
+      <div class="controls-header">
         <button id="installBtn" class="btn ghost" style="display:none">Install</button>
         <button id="themeToggle" class="btn ghost">🌙</button>
       </div>
     </header>
 
     <main class="grid">
-      <!-- Left: scanner, card, report -->
+      <!-- left: scanner & report -->
       <section class="panel left">
-        <div class="controls">
-          <button id="btnStart" class="btn primary">📷 Scan QR (Back)</button>
-          <button id="btnStop" class="btn ghost" style="display:none">⏹ Stop</button>
-          <button id="btnTorch" class="btn ghost" style="display:none">🔦 Torch</button>
-          <button id="btnGallery" class="btn ghost">🖼 Upload QR Image</button>
-          <button id="btnManual" class="btn ghost">🔎 Manual</button>
-        </div>
+        <div class="scanner-card card">
+          <h2>Scan QR / Camera</h2>
+          <video id="camera" autoplay playsinline muted></video>
+          <canvas id="scanCanvas" hidden></canvas>
 
-        <div id="scannerArea" class="scanner-area">
-          <div id="qr-reader" class="qr-reader"></div>
-          <div id="scannerFallback" class="placeholder">Camera preview will appear here — or use Upload / Manual</div>
+          <div class="scanner-actions">
+            <button id="btnStart" class="btn primary">📷 Start Scan (Rear)</button>
+            <button id="btnStop" class="btn ghost" style="display:none">⏹ Stop</button>
+            <button id="btnTorch" class="btn ghost" style="display:none">🔦 Torch</button>
+            <button id="btnGallery" class="btn ghost">🖼 Upload QR Image</button>
+          </div>
+
+          <div class="manual">
+            <p class="muted">Or search manually:</p>
+            <input id="searchInput" placeholder="Search drug name (e.g., Augmentin)" />
+            <div style="display:flex;gap:8px;margin-top:8px">
+              <button id="btnSearch" class="btn primary small">🔎 Search</button>
+              <button id="btnClearSearch" class="btn ghost small">Clear</button>
+            </div>
+          </div>
         </div>
 
         <div id="drugCard" class="card hidden"></div>
 
         <div id="reportPanel" class="card hidden">
-          <strong>Submit New ADR</strong>
+          <h3>📝 Report New ADR</h3>
           <form id="reportForm" class="form-grid" autocomplete="off">
-            <input id="p_name" placeholder="Patient full name" required />
+            <input id="p_name" placeholder="Patient name" required />
             <input id="p_age" type="number" placeholder="Age" required />
             <select id="p_gender" required><option value="">Gender</option><option>Male</option><option>Female</option><option>Other</option></select>
             <input id="p_phone" placeholder="Phone (optional)" />
@@ -68,7 +68,7 @@
             <textarea id="p_desc" placeholder="Describe ADR..." required></textarea>
 
             <div class="actions">
-              <button type="button" id="btnClear" class="btn ghost">Clear</button>
+              <button type="button" id="btnReset" class="btn ghost">Reset</button>
               <button type="submit" class="btn primary">Submit Report</button>
             </div>
           </form>
@@ -77,30 +77,24 @@
         </div>
       </section>
 
-      <!-- Right: search, chart, history, info -->
+      <!-- right: chart + history + info -->
       <aside class="panel right">
-        <div class="side-top">
-          <input id="searchInput" placeholder="Search drug manually e.g., Augmentin" />
-          <div class="side-actions">
-            <button id="btnSearch" class="btn primary small">Search</button>
+        <div class="card">
+          <h3>Search & Export</h3>
+          <div style="display:flex;gap:8px;">
             <button id="btnExport" class="btn ghost small">Export Reports</button>
             <button id="btnClearAll" class="btn warn small">Clear Reports</button>
           </div>
         </div>
 
-        <div class="card chart-card">
-          <h4>ADR Severity Distribution</h4>
-          <canvas id="severityChart" height="140"></canvas>
-        </div>
-
-        <div class="card history">
+        <div class="card">
           <h3>📜 ADR Report History</h3>
-          <div id="historyList"></div>
+          <div id="historyList" style="max-height:380px;overflow:auto"></div>
         </div>
 
-        <div class="card info">
-          <h4>Sources & Notes</h4>
-          <p class="muted small">Local DRAP JSON is authoritative for demo. openFDA used as fallback (US data). For educational/demo use only.</p>
+        <div class="card">
+          <h3>🔎 Notes & Sources</h3>
+          <p class="muted small">Local DRAP dataset is authoritative in this demo. openFDA used as fallback for label/event data (US). Use for educational/demo only.</p>
         </div>
       </aside>
     </main>
@@ -108,7 +102,7 @@
     <div id="toast" class="toast" hidden></div>
 
     <footer class="footer">
-      <small>© 2025 MediScan Pro — Developed & Provided by <strong>HCK_Pharma</strong></small>
+      <small>© 2025 MediScan Pro — Provided by <strong>HCK-Pharma</strong></small>
     </footer>
   </div>
 </body>
